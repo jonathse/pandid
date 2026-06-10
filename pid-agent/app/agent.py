@@ -33,16 +33,54 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-try:
-    _, project_id = google.auth.default()
-except Exception:
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "donuts-dev")
 
-os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+def validate_dataset_id(dataset_id: str | None = None) -> None:
+    """Validates that the BigQuery dataset ID matches GCP naming rules."""
+    import re
+    if dataset_id is None:
+        dataset_id = os.environ.get("BIGQUERY_DATASET_ID", "pandid")
+    if not dataset_id:
+        raise ValueError("BIGQUERY_DATASET_ID environment variable is empty.")
+    if not re.match(r"^[a-zA-Z0-9_]+$", dataset_id):
+        raise ValueError(
+            f"Invalid BIGQUERY_DATASET_ID '{dataset_id}'. "
+            f"BigQuery dataset IDs must contain only letters (a-z, A-Z), numbers (0-9), and underscores (_). "
+            f"Hyphens and other special characters are not allowed. "
+            f"Please update BIGQUERY_DATASET_ID in your .env file or environment."
+        )
+    if len(dataset_id) > 1024:
+        raise ValueError(
+            f"Invalid BIGQUERY_DATASET_ID '{dataset_id}'. "
+            f"BigQuery dataset IDs must be at most 1024 characters long."
+        )
 
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "gemini-3-flash-preview")
+
+validate_dataset_id()
+
+# Read config from .env strictly with no hardcoded fallbacks
+GOOGLE_CLOUD_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT")
+if not GOOGLE_CLOUD_PROJECT:
+    raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is missing or empty in .env.")
+
+GOOGLE_CLOUD_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION")
+if not GOOGLE_CLOUD_LOCATION:
+    raise ValueError("GOOGLE_CLOUD_LOCATION environment variable is missing or empty in .env.")
+
+GOOGLE_GENAI_USE_VERTEXAI = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI")
+if not GOOGLE_GENAI_USE_VERTEXAI:
+    raise ValueError("GOOGLE_GENAI_USE_VERTEXAI environment variable is missing or empty in .env.")
+
+AGENT_MODEL = os.environ.get("AGENT_MODEL")
+if not AGENT_MODEL:
+    raise ValueError("AGENT_MODEL environment variable is missing or empty in .env.")
+
+# Strip quotes if they are present in the env var values (e.g. AGENT_MODEL="gemini-3.5-flash")
+AGENT_MODEL = AGENT_MODEL.strip("\"'")
+
+# Keep os.environ up-to-date for SDKs
+os.environ["GOOGLE_CLOUD_PROJECT"] = GOOGLE_CLOUD_PROJECT
+os.environ["GOOGLE_CLOUD_LOCATION"] = GOOGLE_CLOUD_LOCATION
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = GOOGLE_GENAI_USE_VERTEXAI
 
 
 def ensure_tables_exist():
@@ -50,7 +88,7 @@ def ensure_tables_exist():
     try:
         client = bigquery.Client()
         dataset_id = os.environ.get("BIGQUERY_DATASET_ID", "pandid")
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "donuts-dev")
+        project_id = GOOGLE_CLOUD_PROJECT
 
         dataset_ref = client.dataset(dataset_id, project=project_id)
 
@@ -99,6 +137,25 @@ def ensure_tables_exist():
         client.query(edges_ddl).result()
         print("Tables ensured successfully.")
 
+        try:
+            print("Ensuring property graph exists...")
+            graph_id = f"{project_id}.{dataset_id}.pandid_graph"
+            graph_ddl = f"""
+            CREATE OR REPLACE PROPERTY GRAPH `{graph_id}`
+            NODE TABLES (
+              `{nodes_table_id}` AS Node KEY (diagram_id, id)
+            )
+            EDGE TABLES (
+              `{edges_table_id}` AS Connected_To
+                SOURCE KEY (diagram_id, source_id) REFERENCES Node (diagram_id, id)
+                DESTINATION KEY (diagram_id, target_id) REFERENCES Node (diagram_id, id)
+            )
+            """
+            client.query(graph_ddl).result()
+            print("Property graph ensured successfully.")
+        except Exception as graph_err:
+            print(f"Warning: Could not create/update property graph: {graph_err}")
+
     except Exception as e:
         print(f"Warning: Could not ensure tables exist: {e}")
 
@@ -121,11 +178,9 @@ def load_to_bigquery(nodes_json: str, edges_json: str) -> str:
         edges_data = json.loads(edges_json)
 
         dataset_id = os.environ.get("BIGQUERY_DATASET_ID", "pandid")
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "donuts-dev")
+        project_id = GOOGLE_CLOUD_PROJECT
 
-        diagram_id = nodes_data.get("diagram_id") or edges_data.get(
-            "diagram_id"
-        )
+        diagram_id = nodes_data.get("diagram_id") or edges_data.get("diagram_id")
 
         # Deduplicate nodes in Python
         seen_nodes = set()
@@ -174,7 +229,9 @@ def load_to_bigquery(nodes_json: str, edges_json: str) -> str:
             """
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("json_data", "STRING", json.dumps(unique_nodes))
+                    bigquery.ScalarQueryParameter(
+                        "json_data", "STRING", json.dumps(unique_nodes)
+                    )
                 ]
             )
             client.query(nodes_merge_query, job_config=job_config).result()
@@ -201,7 +258,9 @@ def load_to_bigquery(nodes_json: str, edges_json: str) -> str:
             """
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("json_data", "STRING", json.dumps(unique_edges))
+                    bigquery.ScalarQueryParameter(
+                        "json_data", "STRING", json.dumps(unique_edges)
+                    )
                 ]
             )
             client.query(edges_merge_query, job_config=job_config).result()
@@ -211,9 +270,11 @@ def load_to_bigquery(nodes_json: str, edges_json: str) -> str:
         return f"Error loading to BigQuery: {e}"
 
 
-async def save_file_as_artifact(filepath: str, artifact_name: str, context: ToolContext) -> str:
+async def save_file_as_artifact(
+    filepath: str, artifact_name: str, context: ToolContext
+) -> str:
     """Reads a local file and saves it as an ADK artifact.
-    
+
     Args:
         filepath: Path to the local file.
         artifact_name: Name to give to the artifact.
@@ -221,16 +282,16 @@ async def save_file_as_artifact(filepath: str, artifact_name: str, context: Tool
     try:
         if not os.path.exists(filepath):
             return f"Error: File not found at {filepath}"
-            
+
         with open(filepath, "rb") as f:
             data = f.read()
-            
-        mime_type = "image/png" # Default
+
+        mime_type = "image/png"  # Default
         if filepath.endswith(".pdf"):
             mime_type = "application/pdf"
         elif filepath.endswith(".jpg") or filepath.endswith(".jpeg"):
             mime_type = "image/jpeg"
-            
+
         artifact = types.Part.from_bytes(data=data, mime_type=mime_type)
         version = await context.save_artifact(filename=artifact_name, artifact=artifact)
         return f"Successfully saved file {filepath} as artifact {artifact_name} version {version}."
@@ -242,10 +303,8 @@ async def save_file_as_artifact(filepath: str, artifact_name: str, context: Tool
 ensure_tables_exist()
 
 
-# Load the skill from the directory provided by the user
-skill_dir = pathlib.Path(
-    "/Users/sinanek/Documents/code/pandid/pid-parsing-extraction"
-)
+# Load the skill from the directory relative to this file
+skill_dir = pathlib.Path(__file__).parents[2] / "pid-parsing-extraction"
 pid_skill = load_skill_from_dir(skill_dir)
 pid_skill_toolset = skill_toolset.SkillToolset(skills=[pid_skill])
 
@@ -276,6 +335,7 @@ extractor_agent = LlmAgent(
         model=AGENT_MODEL,
         retry_options=types.HttpRetryOptions(attempts=3, initial_delay=2.0),
     ),
+    code_executor=BuiltInCodeExecutor(),
     instruction=(
         "You are a specialized agent for parsing and extracting information from P&IDs. "
         "Use the provided skill to extract nodes and edges from the provided image/PDF. "
@@ -291,7 +351,7 @@ extractor_agent = LlmAgent(
     ),
     tools=[pid_skill_toolset, save_file_as_artifact],
     sub_agents=[zoomer_agent],
-    output_key="extracted_data"
+    output_key="extracted_data",
 )
 
 # Define the reviewer sub-agent
@@ -301,15 +361,17 @@ reviewer_agent = LlmAgent(
         model=AGENT_MODEL,
         retry_options=types.HttpRetryOptions(attempts=10, initial_delay=2.0),
     ),
+    code_executor=BuiltInCodeExecutor(),
     instruction=(
         "You are a meticulous reviewer of P&ID extractions. "
-        "Read the extracted data from {extracted_data}. "
+        "Read the extracted data from {extracted_data?}. "
+        "If no extracted data is provided yet, wait for the extractor_agent to output the data. "
         "Verify if all entries are complete and valid according to P&ID standards. "
         "If satisfactory, use the load_to_bigquery tool to save the data, and then use the exit_loop tool to finish. "
         "If NOT satisfactory, provide specific feedback on what is missing or invalid."
     ),
     tools=[load_to_bigquery, exit_loop],
-    output_key="feedback"
+    output_key="feedback",
 )
 
 # Define the loop agent
@@ -317,7 +379,7 @@ refinement_loop = LoopAgent(
     name="refinement_loop",
     description="Iteratively refines P&ID extraction until valid.",
     max_iterations=3,
-    sub_agents=[extractor_agent, reviewer_agent]
+    sub_agents=[extractor_agent, reviewer_agent],
 )
 
 # Define the root agent
@@ -327,9 +389,16 @@ root_agent = Agent(
         model=AGENT_MODEL,
         retry_options=types.HttpRetryOptions(attempts=10, initial_delay=2.0),
     ),
+    code_executor=BuiltInCodeExecutor(),
     instruction=(
         "You are a helpful AI assistant designed to analyze P&IDs. "
-        "When a user provides a P&ID (image or PDF), delegate the extraction task to the refinement_loop."
+        "When a user provides a P&ID (image or PDF), delegate the extraction task to the refinement_loop. "
+        "Once the refinement_loop completes, retrieve the extracted data from {extracted_data?} and provide a professional, friendly, and complete summary response to the user. "
+        "Your final response must include:\n"
+        "1. A confirmation of successful extraction and upload of nodes and edges to BigQuery.\n"
+        "2. A high-level overview summarizing the extracted elements (e.g. total count of nodes and edges, or key components and connections found) based on {extracted_data?}.\n"
+        "3. The exact BigQuery resources created or updated: the nodes table, the edges table, and the property graph `pandid_graph`.\n"
+        "4. A copy-pasteable sample SQL query showing the user how to query the newly created Property Graph using BigQuery's Graph Query Language (GQL) syntax (e.g., using GRAPH MATCH ... RETURN), so they can run graph queries directly in their BigQuery Console."
     ),
     sub_agents=[refinement_loop],
 )
