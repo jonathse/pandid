@@ -1,59 +1,160 @@
-# Pandid - P&ID Analysis Agent
+# Pandid: P&ID Digitization Agent Boilerplate
 
-This project contains an ADK-based agent designed to parse Piping and Instrumentation Diagrams (P&IDs) and load the extracted structured data into BigQuery.
+Pandid is a complete blueprint and boilerplate demonstrating how to build a highly intelligent process engineering agent using the **Agent Development Kit (ADK)** and **`agents-cli`**. 
 
-## Project Structure
+This agent parses Piping and Instrumentation Diagrams (P&IDs) from images or PDFs, extracts physical components (valves, instruments, primary equipment) and process/electrical connections (pipes, signal lines), and streams them into BigQuery as structured node-and-edge graphs.
 
-- `pid-agent`: The core agent application, built with the Google Cloud Agent Starter Pack.
-- `pid-parsing-extraction`: Contains the custom skill and assets used by the agent to interpret P&IDs.
+---
 
-## What the Agent Does
+## 📂 Project Layout
 
-The agent is designed to automate the extraction of network data (nodes and edges) from P&ID diagrams. It uses a hierarchical multi-agent system:
+*   **`pid-parsing-extraction/` (Modular Skill):** Contains the domain-specific extraction prompt instructions and reference guidelines (`SKILL.md`). In the ADK architecture, skills are decoupled modules that can be reused across different agents.
+*   **`pid-agent/` (Agent Application):** The core application holding the multi-agent routing logic (`app/agent.py`), unit/integration tests (`tests/`), and environment configuration.
 
-1.  **Extractor Agent**: Parses the P&ID using a specialized skill to identify nodes (devices, instruments) and edges (pipelines, connections). It can delegate tasks to a **Zoomer Agent** to crop and focus on specific dense regions of the diagram for better accuracy.
-2.  **Reviewer Agent**: Validates the extracted data against P&ID standards. If the data is satisfactory, it uses a BigQuery tool to persist the data. If not, it provides feedback to the Extractor for another iteration.
-3.  **Refinement Loop**: Orchestrates the interaction between the Extractor and Reviewer up to a maximum number of iterations to ensure high-quality output.
+```mermaid
+graph TD
+    User([User uploads P&ID]) --> Root[Root Agent]
+    Root --> Loop[Refinement Loop]
+    subgraph Iterative Extraction & Review Loop
+        Loop --> Extractor[Extractor Agent]
+        Extractor -. Uses .-> Skill[P&ID Parsing Skill]
+        Extractor -- Cropping request --> Zoomer[Zoomer Agent]
+        Zoomer -- Cropped image artifact --> Extractor
+        Extractor -- Extracted JSON --> Reviewer[Reviewer Agent]
+        Reviewer -- SQL Merge query --> BigQuery[(BigQuery)]
+        Reviewer -- Revision feedback if invalid --> Extractor
+    end
+```
 
-Extracted data is stored in BigQuery in two tables: `nodes` and `edges`, with constraints to ensure data integrity.
+---
 
-## How to Trigger and Try It
+## 🚀 Beginner's Guide: Local Setup and Deployment
 
-### Prerequisites
+This guide assumes you have **no prior experience** with ADK or `agents-cli`, and limited familiarity with Google Cloud. Follow these step-by-step instructions to get the agent running locally and deployed to the cloud.
 
-- **uv**: Fast Python package installer and resolver. [Install uv](https://docs.astral.sh/uv/getting-started/installation/).
-- **Google Cloud SDK**: For authentication and accessing BigQuery. [Install Google Cloud SDK](https://cloud.google.com/sdk/docs/install).
-- **Make**: Usually pre-installed on macOS/Linux.
+### 🛠️ Prerequisites
 
-### Setup and Run
+Before you start, you need to install two lightweight tools on your machine:
 
-1.  **Navigate to the agent directory**:
+1.  **`uv` (fast Python tool and package manager):**
+    *   *macOS/Linux:*
+        ```bash
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        ```
+    *   *Windows (PowerShell):*
+        ```powershell
+        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+        ```
+2.  **Google Cloud SDK (`gcloud`):**
+    *   Follow the [Official Google Cloud SDK installation instructions](https://cloud.google.com/sdk/docs/install) for your operating system.
+
+---
+
+### Step 1: Clone the Repository and Navigate
+Clone this repository to your local machine and change directory into the project:
+```bash
+git clone https://github.com/sinaakhtar/pandid.git
+cd pandid
+```
+
+---
+
+### Step 2: Set Up Your Google Cloud Project
+
+You need a Google Cloud Project with Billing enabled to use Gemini Enterprise Agent Platform and BigQuery. 
+
+1.  Note your **Project ID**.
+2.  **Login to Google Cloud in your terminal:**
+    ```bash
+    gcloud auth login
+    ```
+3.  **Set your active project:**
+    ```bash
+    gcloud config set project YOUR_PROJECT_ID
+    ```
+4.  **Configure Application Default Credentials (ADC):**
+    This step is **critical**! It allows the ADK python library running locally to safely use your Google Cloud credentials to make Gemini API calls:
+    ```bash
+    gcloud auth application-default login
+    ```
+
+---
+
+### Step 3: Create the Environment File (`.env`)
+
+Environment variables tell the agent which project, location, and database dataset to target.
+
+1.  Navigate into the `pid-agent` application folder:
     ```bash
     cd pid-agent
     ```
-
-2.  **Install dependencies**:
-    ```bash
-    make install
-    ```
-
-3.  **Set up environment variables**:
-    Copy `.env.example` to `.env` and fill in the required values, such as `GOOGLE_CLOUD_PROJECT` and `BIGQUERY_DATASET_ID`.
+2.  Copy the template environment file:
     ```bash
     cp .env.example .env
     ```
+3.  Open `.env` in any text editor and replace the placeholder values:
+    *   `GOOGLE_CLOUD_PROJECT`: Set this to your **Project ID** from Step 2.
+    *   `GOOGLE_CLOUD_LOCATION`: Leave as `us-central1` or set your preferred Vertex AI region.
+    *   `BIGQUERY_DATASET_ID`: Set this to the BigQuery dataset where you want extracted tables to go (e.g., `pandid`). The agent will **automatically create this dataset** and its nodes/edges tables upon startup!
 
-4.  **Launch the local playground**:
+---
+
+### Step 4: Run the Agent Locally
+
+`agents-cli` is the unified command-line tool that handles package installation, code linting, evaluation, and running local developer playgrounds.
+
+1.  **Install `agents-cli` globally:**
     ```bash
-    make playground
+    uv tool install google-agents-cli
     ```
+2.  **Initialize the developer skills & environment:**
+    ```bash
+    uvx google-agents-cli setup
+    ```
+3.  **Install project dependencies:**
+    This command syncs all python packages required by the agent inside a local virtual environment:
+    ```bash
+    agents-cli install
+    ```
+4.  **Start the Local Playground:**
+    Launch the interactive local web playground:
+    ```bash
+    agents-cli playground
+    ```
+    *   This will print a local URL (usually `http://localhost:8501`). Open it in your browser!
+    *   In the web interface, select the **`app`** folder to connect to your agent.
+    *   Try talking to your agent! Ask: *"Hello, what can you do?"* or upload a P&ID diagram and ask: *"Extract the process flow network from this diagram."*
 
-5.  **Try it**:
-    Once the playground is running, you can interact with the agent. Upload a P&ID image or PDF and ask the agent to "Extract nodes and edges from this diagram".
+---
 
-## Pushing changes to GitHub
+### Step 5: Deploy the Agent to Google Cloud
 
-To push changes to the repository, use the following command to specify the correct SSH key if needed:
+Once you are happy with the agent's local behavior, you can deploy it to the cloud.
+
+1.  **Prototyping vs Production Deployments:**
+    By default, this boilerplate is in **Prototype Mode** (no cloud target is set).
+2.  **Add a Deployment Target:**
+    If you want to deploy the agent as a fully-managed API on Google Cloud, enhance the project scaffolding to add **Agent Runtime** (Vertex AI Agent Runtime) or **Cloud Run**:
+    ```bash
+    # Add Agent Runtime deployment support
+    agents-cli scaffold enhance . --deployment-target agent_runtime
+    ```
+3.  **Deploy:**
+    Trigger the deployment pipeline with a single command:
+    ```bash
+    agents-cli deploy
+    ```
+    The CLI will provision any necessary resources and host your agent securely on Google Cloud!
+
+---
+
+## 🧪 Testing Your Code
+
+To ensure imports and local components are functioning correctly:
 ```bash
-GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519_nutrihelp" git push -u origin main
+uv run pytest tests/unit
+```
+To run code formatting and code quality checks:
+```bash
+agents-cli lint
 ```
